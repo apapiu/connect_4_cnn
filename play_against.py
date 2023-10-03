@@ -1,3 +1,7 @@
+
+import numpy as np
+from nn_player import get_nn_preds
+
 def play_against_human(player_class, human_player):
     winner = None
     s = np.zeros([6,7])
