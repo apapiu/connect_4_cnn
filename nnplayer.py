@@ -14,20 +14,41 @@ from tensorflow.keras.layers import Dense, Dropout, Flatten, Conv2D, BatchNormal
 # TODO: put this in a Board class
 # TODO: Use a generic Player class.
 
-def make_move_inplace(s, i, player):
-    lev = 6 - np.count_nonzero(s[:, i] == 0)
-    s[lev, i] = player
+class Board:
+    """A board"""
+
+    def __init__(self):
+        self.s = np.zeros([6, 7])
+        #self.player?
+
+    def get_possible_moves(self):
+        moves = 6 - (self.s == 0).sum(0)
+        return np.nonzero(moves < 6)[0]
+    
+    def make_move_inplace(self, i, player):
+        lev = 6 - np.count_nonzero(self.s[:, i] == 0)
+        self.s[lev, i] = player
 
 
-def get_possible_moves(s):
-    moves = 6 - (s == 0).sum(0)
-    return np.nonzero(moves < 6)[0]
+# def make_move_inplace(s, i, player):
+#     lev = 6 - np.count_nonzero(s[:, i] == 0)
+#     s[lev, i] = player
 
 
-def play_random_move(s, player):
-    pos_moves = get_possible_moves(s)
+# def get_possible_moves(s):
+#     moves = 6 - (s == 0).sum(0)
+#     return np.nonzero(moves < 6)[0]
+
+
+# def play_random_move(s, player):
+#     pos_moves = get_possible_moves(s)
+#     rand_move = np.random.choice(pos_moves)
+#     make_move_inplace(s, rand_move, player)
+
+def play_random_move(board, player):
+    pos_moves = board.get_possible_moves()
     rand_move = np.random.choice(pos_moves)
-    make_move_inplace(s, rand_move, player)
+    board.make_move_inplace(rand_move, player)
 
 
 def get_nn_preds(s, model, player):
