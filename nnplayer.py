@@ -1,13 +1,18 @@
+import os
+import yaml
+
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-
 from scipy.signal import convolve2d
 
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.optimizers import Adam, RMSprop
 from tensorflow.keras.layers import Dense, Dropout, Flatten, Conv2D, BatchNormalization
+from tensorflow.keras.experimental import CosineDecay
 
+from tensorflow.keras.layers import Input, Conv2D, Dense, Flatten, Add
+from tensorflow.keras.models import Model
 
 # %config InlineBackend.figure_format = 'retina'
 
@@ -202,19 +207,20 @@ class NNPlayer:
             states, winners, winner = game.simulate()
             results.append(winner)
 
-
         self.winner_eval += results
         model_win = 1 if first else -1
         winning_perc = (pd.Series(results) == model_win).mean() * 100
 
         print(f"{np.round(winning_perc, 2)}% winning against {opp.name}")
 
-    def train_model(self, ntrain=10000):
+    def train_model(self, ntrain=10000, last_n_games=15000):
+        self.states = self.states[-last_n_games:]
+        self.winners = self.winners[-last_n_games:]
 
-        X = np.concatenate(self.states[-300000:])
-        y = np.concatenate(self.winners[-300000:])
+        X = np.concatenate(self.states)
+        y = np.concatenate(self.winners)
 
-        moves_away = np.concatenate([np.arange(i.shape[0], 0, -1) for i in self.states[-300000:]])
+        moves_away = np.concatenate([np.arange(i.shape[0], 0, -1) for i in self.states])
         sample_weights = (1 / np.sqrt(moves_away))
 
         X_curr = X.reshape(-1, 6, 7, 1).astype("int8")
@@ -253,16 +259,40 @@ class RandomPlayer:
         return self.move_function(s, player, self.plus)
 
 
-def build_model(lr=0.001):
-    model = Sequential()
-    model.add(Conv2D(64, (3, 3), padding="same", activation='relu', input_shape=(6, 7, 1)))
-    model.add(Conv2D(64, (3, 3), padding="same", activation='relu'))
-    model.add(Conv2D(128, (3, 3), padding="same", activation='relu'))
-    model.add(Flatten())
-    model.add(Dense(units=64, activation='relu'))
-    model.add(Dense(units=64, activation='relu'))
-    model.add(Dense(units=1, activation='linear', dtype='float32'))
+def build_model(lr=0.001, resnet=False, n_blocks=6):
+    
+    if resnet:
+        input_layer = Input(shape=(6, 7, 1))
 
+        x = Conv2D(128, (3, 3), padding="same", activation="relu")(input_layer)
+
+        # Residual blocks
+        for _ in range(n_blocks): 
+            residual = x  
+
+            x = Conv2D(128, (3, 3), padding="same", activation="relu")(x)
+            x = Conv2D(128, (3, 3), padding="same", activation="relu")(x)
+            x = Add()([x, residual])
+
+        x = Flatten()(x)
+        x = Dense(units=128, activation='relu')(x)
+        x = Dense(units=128, activation='relu')(x)
+        output_layer = Dense(units=1, activation='linear', dtype='float32')(x)
+
+        model = Model(inputs=input_layer, outputs=output_layer)
+    else:
+       
+        model = Sequential()
+        model.add(Conv2D(64, (3, 3), padding="same", activation='relu', input_shape=(6, 7, 1)))
+        model.add(Conv2D(128, (3, 3), padding="same", activation='relu'))
+        model.add(Conv2D(256, (3, 3), padding="same", activation='relu'))
+        model.add(Flatten())
+        model.add(Dense(units=128, activation='relu'))
+        model.add(Dense(units=128, activation='relu'))
+        model.add(Dense(units=1, activation='linear', dtype='float32'))
+    
+    
+    #lr_schedule = CosineDecay(initial_learning_rate=1e-2, decay_steps=10000)
     opt = Adam(learning_rate=lr)
 
     model.compile(loss="mean_squared_error",
@@ -285,22 +315,53 @@ def play_vs(player_1, player_2,
 
 
 if __name__ == "__main__":
-    model = build_model(lr=0.001)
-    n_iter = 50
-    warm_start = False
-    n_games = 250
-    ntrain = n_games*40
-
-    nnplayer_regular = NNPlayer(optimal_nn_move_noise, model, 0, False)
-    nnplayer_noise = NNPlayer(optimal_nn_move_noise, model, 0.2, False)
+    
     random_player_plus = RandomPlayer(random_move, True)
     random_player_reg = RandomPlayer(random_move, False)
 
-    for _ in range(n_iter):
-        nnplayer_regular.eval_model_battle(n=50, opp=random_player_plus, first=False)
-        nnplayer_regular.simulate_noisy_game(n=n_games)
-        nnplayer_regular.train_model(ntrain=ntrain)
+    #TODO: put this in a yaml file:
+    n_iter = 750
+    warm_start = False
+    n_games = 250
+    ntrain = n_games*40
+    eval_games = 50
+    noise_lb = 0.10
+    noise_ub = 0.25
+    name = "simple_15k_mem"
+    lr = 0.001
+    opp = random_player_plus
+    last_n_games = 15000
+    
+    
+    # model = load_model('my_model_varying_noise_resnet.keras')
+    model = build_model(lr=lr)
+    print(model.summary())
+    
+    if not os.path.exists(name):
+        os.makedirs(name)
+    
+    nnplayer_regular = NNPlayer(optimal_nn_move_noise, model, 0, False)
+    nnplayer_noise = NNPlayer(optimal_nn_move_noise, model, 0.2, False)
+    
+    config = {k: v for k, v in locals().items() if k in ['n_iter', 'warm_start', 'n_games', 
+                                                         'ntrain', 'eval_games', 'noise_lb', 
+                                                         'noise_ub', 'name', 'lr', 'opp', 'last_n_games']}
+    
+    with open(os.path.join(name, 'config.yaml'), 'w') as yaml_file:
+        yaml.dump(config, yaml_file)
+        
+  
+    with open(os.path.join(name, 'model_config.yaml'), 'w') as yaml_file:
+        yaml_file.write(model.to_json())
 
-
-### 7000 games to get to ~100% win rate starting second against random
-### 10k games
+    for i in range(n_iter):
+        nnplayer_regular.eval_model_battle(n=50, opp=opp, first=False)
+        noise = np.random.uniform(noise_lb, noise_ub)
+        print(noise)
+        nnplayer_regular.simulate_noisy_game(n=n_games, noise_level=noise)
+        nnplayer_regular.train_model(ntrain=ntrain, last_n_games=last_n_games)
+        
+        results = pd.Series(nnplayer_regular.winner_eval) == -1
+        results_g = results.groupby(lambda x: x // eval_games).mean()
+        results_g.to_csv(os.path.join(name, "results.csv"))
+        nnplayer_regular.model.save(os.path.join(name, 'my_model.keras'))
