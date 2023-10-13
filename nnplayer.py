@@ -14,115 +14,124 @@ from tensorflow.keras.experimental import CosineDecay
 from tensorflow.keras.layers import Input, Conv2D, Dense, Flatten, Add
 from tensorflow.keras.models import Model
 
-# %config InlineBackend.figure_format = 'retina'
 
-# TODO: put this in a Board class
-# TODO: Use a generic Player class.
+class Board:
 
-def make_move_inplace(s, i, player):
-    lev = 6 - np.count_nonzero(s[:, i] == 0)
-    s[lev, i] = player
+     #convolutional kernels to detect a win:
+    detection_kernels = [
+        np.array([[1, 1, 1, 1]]), #horizontal_kernel
+        np.array([[1], [1], [1], [1]]), #vertical_kernel
+        np.eye(4, dtype=np.uint8), #diag1_kernel
+        np.fliplr(np.eye(4, dtype=np.uint8)) #diag2_kernel
+    ]
 
+    """A board"""
 
-def get_possible_moves(s):
-    moves = 6 - (s == 0).sum(0)
-    return np.nonzero(moves < 6)[0]
+    def __init__(self):
+        self.s = np.zeros([6, 7])
+        #self.player?
 
+    def get_possible_moves(self):
+        moves = 6 - (self.s == 0).sum(0)
+        return np.nonzero(moves < 6)[0]
+    
+    def make_move_inplace(self, i, player):
+        lev = 6 - np.count_nonzero(self.s[:, i] == 0)
+        self.s[lev, i] = player
 
-def play_random_move(s, player):
-    pos_moves = get_possible_moves(s)
+    @staticmethod
+    def check_winning_move(s, player):
+        for kernel in Board.detection_kernels:
+            if (convolve2d(s == player, kernel, mode="valid") == 4).any():
+                return True
+        return False
+    
+    def winning_move(self, player):
+        return self.check_winning_move(self.s, player)
+    
+
+######Moves:
+
+def play_random_move(board, player):
+    pos_moves = board.get_possible_moves()
     rand_move = np.random.choice(pos_moves)
-    make_move_inplace(s, rand_move, player)
+    board.make_move_inplace(rand_move, player)
 
-
-def get_nn_preds(s, model, player):
-    possible_moves = get_possible_moves(s)
+def get_nn_preds(board, model, player):
+    possible_moves = board.get_possible_moves()
     moves_np = []
     for i in possible_moves:
-        s_new = s.copy()
-        make_move_inplace(s_new, i, player)
-        moves_np.append(s_new)
-
+        s_new = board.s.copy()
+        board.make_move_inplace(i, player)
+        moves_np.append(board.s)
+        board.s = s_new.copy() # Revert move
+        
     moves_np = np.array(moves_np).reshape(-1, 6, 7, 1)
-
-    # Key to use this: model.predict is 5x slower:
     preds = model(moves_np).numpy()[:, 0]
     return pd.Series(preds, possible_moves)
 
 
-def optimal_nn_move(s, model, player):
-    preds = get_nn_preds(s, model, player)
+def optimal_nn_move(board, model, player):
+    preds = get_nn_preds(board, model, player)
     best_move = preds.idxmax()
-    make_move_inplace(s, best_move, player)
+    board.make_move_inplace(best_move, player)
 
 
-def optimal_nn_move_noise(s, player, model, use_2ply_check=False, std_noise=0):
-    preds = get_nn_preds(s, model, player)
+def optimal_nn_move_noise(board, player, model, std_noise=0):
+    preds = get_nn_preds(board, model, player)
     preds = preds + np.random.normal(0, std_noise, len(preds))
     best_move = preds.idxmax()
-    make_move_inplace(s, best_move, player)
+    board.make_move_inplace(best_move, player)
 
 
-def random_move(s, player, use_2ply_check):
-    possible_moves = get_possible_moves(s)
+def random_move(board, player, use_2ply_check):
+    possible_moves = board.get_possible_moves()
 
     if use_2ply_check:
         for i in possible_moves:
-            s_new = s.copy()
-            make_move_inplace(s_new, i, player)
-            if winning_move(s_new, player):
-                make_move_inplace(s, i, player)
-                return s
+            s_new = board.s.copy()
+            board.make_move_inplace(i, player)
+            if board.winning_move(player):
+                return #state is changed inplace
+            board.s = s_new.copy()
 
         for i in possible_moves:
-            s_new = s.copy()
-            make_move_inplace(s_new, i, (-1) * player)
-            if winning_move(s_new, (-1) * player):
-                make_move_inplace(s, i, player)
-                return s
+            s_new = board.s.copy()
+            board.make_move_inplace(i, (-1) * player)
+            if board.winning_move((-1) * player):
+                board.make_move_inplace(i, player)
+                return
+            board.s = s_new.copy()
 
         bad_moves = []
         for i in possible_moves:
-
-            s_new = s.copy()
-            make_move_inplace(s_new, i, player)
-
-            pos_mov2 = get_possible_moves(s_new)
+            s_new = board.s.copy()
+            board.make_move_inplace(i, player)
+            pos_mov2 = board.get_possible_moves()
 
             for j in pos_mov2:
-                s_new2 = s_new.copy()
-                make_move_inplace(s_new2, j, player*(-1))
+                s_new2 = board.s.copy()
+                board.make_move_inplace(j, player * (-1))
 
-                if winning_move(s_new2, (-1)*player):
+                if board.winning_move((-1) * player):
                     bad_moves.append(i)
+                board.s = s_new2.copy()
+
+            board.s = s_new.copy()
 
         non_lose = np.setdiff1d(possible_moves, bad_moves)
-
         if len(non_lose) > 0:
             possible_moves = non_lose
 
     rand_move = np.random.choice(possible_moves)
-    make_move_inplace(s, rand_move, player)
-
-horizontal_kernel = np.array([[1, 1, 1, 1]])
-vertical_kernel = horizontal_kernel.T
-diag1_kernel = np.eye(4, dtype=np.uint8)
-diag2_kernel = np.fliplr(diag1_kernel)
-detection_kernels = [horizontal_kernel, vertical_kernel, diag1_kernel, diag2_kernel]
-
-
-def winning_move(board, player):
-    for kernel in detection_kernels:
-        if (convolve2d(board == player, kernel, mode="valid") == 4).any():
-            return True
-    return False
+    board.make_move_inplace(rand_move, player)
 
 class Game:
-    def __init__(self, player_1, player_2, plot_rez=False):
+    def __init__(self, player_1, player_2, board=None, plot_rez=False):
         self.player_1 = player_1
         self.player_2 = player_2
         self.plot_rez = plot_rez
-        self.s = np.zeros([6, 7])
+        self.board = board if board is not None else Board() #start with empty board is no board given
         self.game_states = []
         self.player = 1
         self.winner = None
@@ -133,13 +142,13 @@ class Game:
     def simulate(self):
         while self.winner is None:
             if self.player == 1:
-                self.player_1.make_move(self.s, self.player)
+                self.player_1.make_move(self.board, self.player)
             else:
-                self.player_2.make_move(self.s, self.player)
+                self.player_2.make_move(self.board, self.player)
 
-            self.game_states.append(self.s.copy())
+            self.game_states.append(self.board.s.copy())
 
-            if winning_move(self.s, self.player):
+            if self.board.winning_move(self.player):
                 self.winner = self.player
                 break
 
@@ -165,21 +174,22 @@ class Game:
         self.states = game_states_np
         self.winners = turns
 
+class Player:
+    pass
 
 class NNPlayer:
 
-    def __init__(self, move_function, model, noise, plus):
+    def __init__(self, move_function, model, noise):
         self.move_function = move_function
         self.noise = noise
         self.model = model
-        self.plus = plus
         self.games = 0
         self.states = []
         self.winners = []
         self.winner_eval = []
 
-    def make_move(self, s, player):
-        return self.move_function(s, player, self.model, self.plus, self.noise)
+    def make_move(self, board, player):
+        return self.move_function(board, player, self.model, self.noise)
 
     def simulate_random_games(self, n=500):
 
@@ -191,8 +201,8 @@ class NNPlayer:
     def simulate_noisy_game(self, n=100, noise_level=0.2):
 
         for _ in tqdm(range(n)):
-            states, winners, winner = Game(NNPlayer(optimal_nn_move_noise, self.model, noise_level, False),
-                                           NNPlayer(optimal_nn_move_noise, self.model, noise_level, False)).simulate()
+            states, winners, winner = Game(NNPlayer(optimal_nn_move_noise, self.model, noise_level),
+                                           NNPlayer(optimal_nn_move_noise, self.model, noise_level)).simulate()
             self.states.append(states)
             self.winners.append(winners)
 
@@ -255,8 +265,8 @@ class RandomPlayer:
         self.plus = plus
         self.name = 'random_player_2ply' if self.plus else 'random_player'
 
-    def make_move(self, s, player):
-        return self.move_function(s, player, self.plus)
+    def make_move(self, board, player):
+        return self.move_function(board, player, self.plus)
 
 
 def build_model(lr=0.001, resnet=False, n_blocks=6):
@@ -319,7 +329,7 @@ if __name__ == "__main__":
     random_player_plus = RandomPlayer(random_move, True)
     random_player_reg = RandomPlayer(random_move, False)
 
-    #TODO: put this in a yaml file:
+    # TODO: put this in a yaml file:
     n_iter = 750
     warm_start = False
     n_games = 250
@@ -329,7 +339,7 @@ if __name__ == "__main__":
     noise_ub = 0.25
     name = "simple_15k_mem"
     lr = 0.001
-    opp = random_player_plus
+    opp = random_player_reg
     last_n_games = 15000
     
     
@@ -340,8 +350,8 @@ if __name__ == "__main__":
     if not os.path.exists(name):
         os.makedirs(name)
     
-    nnplayer_regular = NNPlayer(optimal_nn_move_noise, model, 0, False)
-    nnplayer_noise = NNPlayer(optimal_nn_move_noise, model, 0.2, False)
+    nnplayer_regular = NNPlayer(optimal_nn_move_noise, model, 0)
+    nnplayer_noise = NNPlayer(optimal_nn_move_noise, model, 0.2)
     
     config = {k: v for k, v in locals().items() if k in ['n_iter', 'warm_start', 'n_games', 
                                                          'ntrain', 'eval_games', 'noise_lb', 
@@ -364,4 +374,4 @@ if __name__ == "__main__":
         results = pd.Series(nnplayer_regular.winner_eval) == -1
         results_g = results.groupby(lambda x: x // eval_games).mean()
         results_g.to_csv(os.path.join(name, "results.csv"))
-        nnplayer_regular.model.save(os.path.join(name, 'my_model.keras'))
+        nnplayer_regular.model.save(os.path.join(name, 'my_model.keras'))   
