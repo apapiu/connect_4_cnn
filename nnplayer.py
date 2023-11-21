@@ -303,6 +303,45 @@ def play_vs(player_1, player_2,
 
     return pd.Series(winner_eval).value_counts(normalize=True)
 
+class ResBlock(nn.Module):
+    def __init__(self, c_in, c_mid, c_out):
+        super().__init__()
+        self.conv = nn.Sequential(nn.Conv2d(c_in, c_mid, 3, padding='same'),
+                                  nn.ReLU(),
+                                  nn.BatchNorm2d(c_mid),
+                                  nn.Conv2d(c_mid, c_out, 3, padding='same'),
+                                  nn.ReLU(),
+                                  nn.BatchNorm2d(c_out)
+                                  )
+        
+        self.resid = nn.Conv2d(c_in, c_out, 1, padding='same') if c_in != c_out else nn.Identity()
+    
+    def forward(self, x):
+
+        return self.conv(x) + self.resid(x)
+
+class ResTower(nn.Module):
+    def __init__(self, c_in, img_dim):
+        super().__init__()
+        self.tower = nn.Sequential(ResBlock(3,      1*c_in, 1*c_in),
+                                   ResBlock(1*c_in, 1*c_in, 1*c_in),
+                                   nn.MaxPool2d(2),
+                                   ResBlock(1*c_in, 2*c_in, 2*c_in),
+                                   ResBlock(2*c_in, 2*c_in, 2*c_in),
+                                   nn.MaxPool2d(2),
+                                   ResBlock(2*c_in, 4*c_in, 4*c_in),
+                                   ResBlock(4*c_in, 4*c_in, 4*c_in),
+                                   nn.AvgPool2d(img_dim//4), #256 dim for 32 input
+                                   nn.Flatten(),
+                                   nn.Linear(4*c_in, 4*c_in),
+                                   nn.ReLU(),
+                                   nn.Linear(4*c_in, 10),
+                                   )
+                                   
+        
+    def forward(self, x):
+         return self.tower(x) 
+
 
 class Model(nn.Module):
     def __init__(self):
