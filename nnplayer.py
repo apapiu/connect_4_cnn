@@ -1,33 +1,30 @@
-import yaml
-import pandas as pd
 import numpy as np
-from tqdm import tqdm
-from scipy.signal import convolve2d
-
-
+import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, IterableDataset, TensorDataset
+from scipy.signal import convolve2d
 from torch.cuda.amp import GradScaler, autocast
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
+import wandb
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-class Board:
 
-     #convolutional kernels to detect a win:
+class Board:
+    # convolutional kernels to detect a win:
     detection_kernels = [
-        np.array([[1, 1, 1, 1]]), #horizontal_kernel
-        np.array([[1], [1], [1], [1]]), #vertical_kernel
-        np.eye(4, dtype=np.uint8), #diag1_kernel
-        np.fliplr(np.eye(4, dtype=np.uint8)) #diag2_kernel
+        np.array([[1, 1, 1, 1]]),  # horizontal_kernel
+        np.array([[1], [1], [1], [1]]),  # vertical_kernel
+        np.eye(4, dtype=np.uint8),  # diag1_kernel
+        np.fliplr(np.eye(4, dtype=np.uint8)),  # diag2_kernel
     ]
 
     """A board"""
 
     def __init__(self):
         self.s = np.zeros([6, 7])
-        #self.player?
+        # self.player?
 
     def get_possible_moves(self):
         moves = 6 - (self.s == 0).sum(0)
@@ -37,7 +34,7 @@ class Board:
         lev = 6 - np.count_nonzero(self.s[:, i] == 0)
         self.s[lev, i] = player
 
-    @staticmethod #note: doing this on GPU makes it slower
+    @staticmethod  # note: doing this on GPU makes it slower
     def check_winning_move(s, player):
         for kernel in Board.detection_kernels:
             if (convolve2d(s == player, kernel, mode="valid") == 4).any():
@@ -47,12 +44,15 @@ class Board:
     def winning_move(self, player):
         return self.check_winning_move(self.s, player)
 
+
 ######Moves:
+
 
 def play_random_move(board, player):
     pos_moves = board.get_possible_moves()
     rand_move = np.random.choice(pos_moves)
     board.make_move_inplace(rand_move, player)
+
 
 def get_nn_preds(board, model, player):
     possible_moves = board.get_possible_moves()
@@ -61,7 +61,7 @@ def get_nn_preds(board, model, player):
         s_new = board.s.copy()
         board.make_move_inplace(i, player)
         moves_np.append(board.s)
-        board.s = s_new.copy() # Revert move
+        board.s = s_new.copy()  # Revert move
 
     moves_np = np.array(moves_np).reshape(-1, 1, 6, 7)
 
@@ -94,7 +94,7 @@ def random_move(board, player, use_2ply_check):
             s_new = board.s.copy()
             board.make_move_inplace(i, player)
             if board.winning_move(player):
-                return #state is changed inplace
+                return  # state is changed inplace
             board.s = s_new.copy()
 
         for i in possible_moves:
@@ -129,12 +129,15 @@ def random_move(board, player, use_2ply_check):
     rand_move = np.random.choice(possible_moves)
     board.make_move_inplace(rand_move, player)
 
+
 class Game:
     def __init__(self, player_1, player_2, board=None, plot_rez=False):
         self.player_1 = player_1
         self.player_2 = player_2
         self.plot_rez = plot_rez
-        self.board = board if board is not None else Board() #start with empty board is no board given
+        self.board = (
+            board if board is not None else Board()
+        )  # start with empty board is no board given
         self.game_states = []
         self.player = 1
         self.winner = None
@@ -177,11 +180,12 @@ class Game:
         self.states = game_states_np
         self.winners = turns
 
+
 class Player:
     pass
 
-class NNPlayer:
 
+class NNPlayer:
     def __init__(self, move_function, model, noise):
         self.move_function = move_function
         self.noise = noise
@@ -195,17 +199,19 @@ class NNPlayer:
         return self.move_function(board, player, self.model, self.noise)
 
     def simulate_random_games(self, n=500):
-
         for _ in tqdm(range(n)):
-            states, winners, winner = Game(random_player_plus, random_player_plus).simulate()
+            states, winners, winner = Game(
+                random_player_plus, random_player_plus
+            ).simulate()
             self.states.append(states)
             self.winners.append(winners)
 
     def simulate_noisy_game(self, n=100, noise_level=0.2):
-
         for _ in tqdm(range(n)):
-            states, winners, winner = Game(NNPlayer(optimal_nn_move_noise, self.model, noise_level),
-                                           NNPlayer(optimal_nn_move_noise, self.model, noise_level)).simulate()
+            states, winners, winner = Game(
+                NNPlayer(optimal_nn_move_noise, self.model, noise_level),
+                NNPlayer(optimal_nn_move_noise, self.model, noise_level),
+            ).simulate()
             self.states.append(states)
             self.winners.append(winners)
 
@@ -225,8 +231,9 @@ class NNPlayer:
         winning_perc = (pd.Series(results) == model_win).mean() * 100
 
         print(f"{np.round(winning_perc, 2)}% winning against {opp.name}")
-        wandb.log({"winning_perc": winning_perc, "opp": opp.name}, step=self.model.global_step)
-
+        wandb.log(
+            {"winning_perc": winning_perc, "opp": opp.name}, step=self.model.global_step
+        )
 
     def train_model(self, ntrain=10000, last_n_games=15000, save_every_n_games=2000):
         self.states = self.states[-last_n_games:]
@@ -236,7 +243,7 @@ class NNPlayer:
         y = np.concatenate(self.winners)
 
         moves_away = np.concatenate([np.arange(i.shape[0], 0, -1) for i in self.states])
-        sample_weights = (1 / moves_away )
+        sample_weights = 1 / moves_away
 
         X_curr = X.reshape(-1, 1, 6, 7).astype("int8")
         y_curr = y
@@ -246,22 +253,23 @@ class NNPlayer:
 
         if self.games % save_every_n_games == 0:
             print("Saving Data:")
-            np.save('X.npy', X_curr)
-            np.save('y.npy', y_curr)
-            np.save('sample_weights.npy', sample_weights)
-            wandb.save('X.npy')
-            wandb.save('y.npy')
-            wandb.save('sample_weights.npy')
+            np.save("X.npy", X_curr)
+            np.save("y.npy", y_curr)
+            np.save("sample_weights.npy", sample_weights)
+            wandb.save("X.npy")
+            wandb.save("y.npy")
+            wandb.save("sample_weights.npy")
 
         choices = np.random.choice(np.arange(X_curr.shape[0]), ntrain)
         tr_x = X_curr[choices]
         tr_y = y_curr[choices]
         sample_weights = sample_weights[choices]
 
-        dataset = TensorDataset(torch.tensor(tr_x).float(),
-                                torch.tensor(tr_y).float(),
-                                torch.tensor(sample_weights).float()
-                                )
+        dataset = TensorDataset(
+            torch.tensor(tr_x).float(),
+            torch.tensor(tr_y).float(),
+            torch.tensor(sample_weights).float(),
+        )
 
         data_loader = DataLoader(dataset, batch_size=256, shuffle=True)
 
@@ -273,7 +281,7 @@ class NNPlayer:
             sample_weights = sample_weights.to(device)
             self.model.train()
             loss = self.model.train_step(x, y, sample_weights)
-            wandb.log({"train_loss":loss}, step=self.model.global_step)
+            wandb.log({"train_loss": loss}, step=self.model.global_step)
 
         if self.games % save_every_n_games == 0:
             checkpoint_path = f"model_checkpoint_{self.model.global_step}.pth"
@@ -282,65 +290,69 @@ class NNPlayer:
 
 
 class RandomPlayer:
-
     def __init__(self, move_function, plus):
         self.move_function = move_function
         self.plus = plus
-        self.name = 'random_player_2ply' if self.plus else 'random_player'
+        self.name = "random_player_2ply" if self.plus else "random_player"
 
     def make_move(self, board, player):
         return self.move_function(board, player, self.plus)
 
-def play_vs(player_1, player_2,
-            n_games=100):
+
+def play_vs(player_1, player_2, n_games=100):
     winner_eval = []
 
     for i in tqdm(range(n_games)):
-        _, _, winner = Game(player_1,
-                            player_2).simulate()
+        _, _, winner = Game(player_1, player_2).simulate()
 
         winner_eval.append(winner)
 
     return pd.Series(winner_eval).value_counts(normalize=True)
 
+
 class ResBlock(nn.Module):
     def __init__(self, c_in, c_mid, c_out):
         super().__init__()
-        self.conv = nn.Sequential(nn.Conv2d(c_in, c_mid, 3, padding='same'),
-                                  nn.ReLU(),
-                                  nn.BatchNorm2d(c_mid),
-                                  nn.Conv2d(c_mid, c_out, 3, padding='same'),
-                                  nn.ReLU(),
-                                  nn.BatchNorm2d(c_out)
-                                  )
-        
-        self.resid = nn.Conv2d(c_in, c_out, 1, padding='same') if c_in != c_out else nn.Identity()
-    
-    def forward(self, x):
+        self.conv = nn.Sequential(
+            nn.Conv2d(c_in, c_mid, 3, padding="same"),
+            nn.ReLU(),
+            nn.BatchNorm2d(c_mid),
+            nn.Conv2d(c_mid, c_out, 3, padding="same"),
+            nn.ReLU(),
+            nn.BatchNorm2d(c_out),
+        )
 
+        self.resid = (
+            nn.Conv2d(c_in, c_out, 1, padding="same")
+            if c_in != c_out
+            else nn.Identity()
+        )
+
+    def forward(self, x):
         return self.conv(x) + self.resid(x)
+
 
 class ResTower(nn.Module):
     def __init__(self, c_in, img_dim):
         super().__init__()
-        self.tower = nn.Sequential(ResBlock(3,      1*c_in, 1*c_in),
-                                   ResBlock(1*c_in, 1*c_in, 1*c_in),
-                                   nn.MaxPool2d(2),
-                                   ResBlock(1*c_in, 2*c_in, 2*c_in),
-                                   ResBlock(2*c_in, 2*c_in, 2*c_in),
-                                   nn.MaxPool2d(2),
-                                   ResBlock(2*c_in, 4*c_in, 4*c_in),
-                                   ResBlock(4*c_in, 4*c_in, 4*c_in),
-                                   nn.AvgPool2d(img_dim//4), #256 dim for 32 input
-                                   nn.Flatten(),
-                                   nn.Linear(4*c_in, 4*c_in),
-                                   nn.ReLU(),
-                                   nn.Linear(4*c_in, 10),
-                                   )
-                                   
-        
+        self.tower = nn.Sequential(
+            ResBlock(3, 1 * c_in, 1 * c_in),
+            ResBlock(1 * c_in, 1 * c_in, 1 * c_in),
+            nn.MaxPool2d(2),
+            ResBlock(1 * c_in, 2 * c_in, 2 * c_in),
+            ResBlock(2 * c_in, 2 * c_in, 2 * c_in),
+            nn.MaxPool2d(2),
+            ResBlock(2 * c_in, 4 * c_in, 4 * c_in),
+            ResBlock(4 * c_in, 4 * c_in, 4 * c_in),
+            nn.AvgPool2d(img_dim // 4),  # 256 dim for 32 input
+            nn.Flatten(),
+            nn.Linear(4 * c_in, 4 * c_in),
+            nn.ReLU(),
+            nn.Linear(4 * c_in, 10),
+        )
+
     def forward(self, x):
-         return self.tower(x) 
+        return self.tower(x)
 
 
 class Model(nn.Module):
@@ -348,27 +360,28 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.global_step = 0
 
-        self.conv = model = nn.Sequential(
-                nn.Conv2d(1, 128, 4, padding='same'),
-                nn.ReLU(),
-                nn.Conv2d(128, 256, 3, padding='same'),
-                nn.ReLU(),
-                #nn.Conv2d(256, 256, 3, padding='same'),
-                #nn.ReLU(),
-                nn.MaxPool2d(2),
-                nn.Flatten(),
-                nn.Linear(256*3*3, 128),
-                nn.ReLU(),
-                nn.Dropout(0.2),
-                nn.Linear(128, 128),
-                nn.ReLU(),
-                nn.Linear(128, 1)
-            )
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 128, 4, padding="same"),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, 3, padding="same"),
+            nn.ReLU(),
+            # nn.Conv2d(256, 256, 3, padding='same'),
+            # nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Flatten(),
+            nn.Linear(256 * 3 * 3, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
 
-        self.optimizer=torch.optim.Adam(self.parameters(), lr=0.0003)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=10000, gamma=0.1)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=0.0003)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(
+            self.optimizer, step_size=10000, gamma=0.1
+        )
         self.scaler = GradScaler()
-
 
     def forward(self, x):
         x = self.conv(x)
@@ -395,50 +408,67 @@ class Model(nn.Module):
 
         return loss.item()
 
+
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-if __name__=='__main__':
-     random_player_plus = RandomPlayer(random_move, True)
-     random_player_reg = RandomPlayer(random_move, False)
-     
-     # TODO: put this in a yaml file:
-     n_iter = 100
-     warm_start = False
-     n_games = 1000
-     ntrain = n_games*50
-     eval_games = 50
-     noise_lb = noise_ub = 0.2
-     noise_decay = 0.99
-     noise_min = 0.15
-     name = "simple_15k_pytorch"
-     lr = 0.003
-     opp = random_player_plus
-     last_n_games = 50000
-     save_every_n_games = 10000
-     
-     
-     model = Model().to(device)
-     num_params = count_parameters(model)
-     print(num_params)
-     
-     nnplayer_regular = NNPlayer(optimal_nn_move_noise, model, 0)
-     nnplayer_noise = NNPlayer(optimal_nn_move_noise, model, 0.2)
-     
-     
-     config = {k: v for k, v in locals().items() if k in ['n_iter', 'warm_start', 'n_games',
-                                                             'ntrain', 'eval_games', 'noise_lb',
-                                                             'noise_ub', 'name', 'lr', 'opp', 'last_n_games']}
-     
-     wandb.init(
-         project="connect_4",
-         config = config)
-     
-     for i in range(n_iter):
-         noise_lb = noise_ub = max(noise_lb*noise_decay, noise_min)
-         nnplayer_regular.eval_model_battle(n=50, opp=opp, first=False)
-         noise = np.random.uniform(noise_lb, noise_ub)
-         print(noise)
-         nnplayer_regular.simulate_noisy_game(n=n_games, noise_level=noise)
-         nnplayer_regular.train_model(ntrain=ntrain, last_n_games=last_n_games, save_every_n_games=save_every_n_games)
-     wandb.finish()
+
+if __name__ == "__main__":
+    random_player_plus = RandomPlayer(random_move, True)
+    random_player_reg = RandomPlayer(random_move, False)
+
+    # TODO: put this in a yaml file:
+    n_iter = 100
+    warm_start = False
+    n_games = 1000
+    ntrain = n_games * 50
+    eval_games = 50
+    noise_lb = noise_ub = 0.2
+    noise_decay = 0.99
+    noise_min = 0.15
+    name = "simple_15k_pytorch"
+    lr = 0.003
+    opp = random_player_plus
+    last_n_games = 50000
+    save_every_n_games = 10000
+
+    model = Model().to(device)
+    num_params = count_parameters(model)
+    print(num_params)
+
+    nnplayer_regular = NNPlayer(optimal_nn_move_noise, model, 0)
+    nnplayer_noise = NNPlayer(optimal_nn_move_noise, model, 0.2)
+
+    config = {
+        k: v
+        for k, v in locals().items()
+        if k
+        in [
+            "n_iter",
+            "warm_start",
+            "n_games",
+            "ntrain",
+            "eval_games",
+            "noise_lb",
+            "noise_ub",
+            "name",
+            "lr",
+            "opp",
+            "last_n_games",
+        ]
+    }
+
+    wandb.init(project="connect_4", config=config)
+
+    for i in range(n_iter):
+        noise_lb = noise_ub = max(noise_lb * noise_decay, noise_min)
+        nnplayer_regular.eval_model_battle(n=50, opp=opp, first=False)
+        noise = np.random.uniform(noise_lb, noise_ub)
+        print(noise)
+        nnplayer_regular.simulate_noisy_game(n=n_games, noise_level=noise)
+        nnplayer_regular.train_model(
+            ntrain=ntrain,
+            last_n_games=last_n_games,
+            save_every_n_games=save_every_n_games,
+        )
+    wandb.finish()
