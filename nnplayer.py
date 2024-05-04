@@ -48,12 +48,6 @@ class Board:
 ######Moves:
 
 
-def play_random_move(board, player):
-    pos_moves = board.get_possible_moves()
-    rand_move = np.random.choice(pos_moves)
-    board.make_move_inplace(rand_move, player)
-
-
 def get_nn_preds(board, model, player):
     possible_moves = board.get_possible_moves()
     moves_np = []
@@ -176,7 +170,7 @@ class Game:
         turns = np.empty((len(self.game_states),))
         turns[::2] = 1
         turns[1::2] = -1
-        turns = turns * self.winner
+        turns = turns * self.winner if self.winner is not None else turns
         self.states = game_states_np
         self.winners = turns
 
@@ -185,7 +179,10 @@ class Player:
     pass
 
 
+use_wandb = False
+
 class NNPlayer:
+
     def __init__(self, move_function, model, noise):
         self.move_function = move_function
         self.noise = noise
@@ -231,9 +228,10 @@ class NNPlayer:
         winning_perc = (pd.Series(results) == model_win).mean() * 100
 
         print(f"{np.round(winning_perc, 2)}% winning against {opp.name}")
-        wandb.log(
-            {"winning_perc": winning_perc, "opp": opp.name}, step=self.model.global_step
-        )
+        if use_wandb:
+            wandb.log(
+                {"winning_perc": winning_perc, "opp": opp.name}, step=self.model.global_step
+            )
 
     def train_model(self, ntrain=10000, last_n_games=15000, save_every_n_games=2000):
         self.states = self.states[-last_n_games:]
@@ -251,7 +249,7 @@ class NNPlayer:
         print(X.shape)
         print(y.shape)
 
-        if self.games % save_every_n_games == 0:
+        if self.games % save_every_n_games == 0 and use_wandb:
             print("Saving Data:")
             np.save("X.npy", X_curr)
             np.save("y.npy", y_curr)
@@ -281,12 +279,14 @@ class NNPlayer:
             sample_weights = sample_weights.to(device)
             self.model.train()
             loss = self.model.train_step(x, y, sample_weights)
-            wandb.log({"train_loss": loss}, step=self.model.global_step)
+            if use_wandb:
+                wandb.log({"train_loss": loss}, step=self.model.global_step)
 
         if self.games % save_every_n_games == 0:
             checkpoint_path = f"model_checkpoint_{self.model.global_step}.pth"
             torch.save(self.model, checkpoint_path)
-            wandb.save(checkpoint_path)
+            if use_wandb: 
+                wandb.save(checkpoint_path)
 
 
 class RandomPlayer:
