@@ -1,15 +1,8 @@
 import numpy as np
-from nnplayer import (
-    RandomPlayer,
-    random_move,
-    Game,
-    Board,
-    Model,
-    device,
-    count_parameters,
-    NNPlayer,
-    optimal_nn_move_noise,
-)
+
+from nnplayer import (Board, Game, Model, NNPlayer, RandomPlayer,
+                      count_parameters, device, optimal_nn_move_noise,
+                      random_move)
 
 
 ###basic gameplay:
@@ -52,7 +45,7 @@ def test_nn_model_train():
 
 
 def test_end_to_end():
-    #random_player_plus = RandomPlayer(random_move, True)
+    # random_player_plus = RandomPlayer(random_move, True)
     random_player_reg = RandomPlayer(random_move, False)
 
     n_iter = 3

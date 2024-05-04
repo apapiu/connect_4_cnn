@@ -1,12 +1,14 @@
+from typing import Protocol, cast
+
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import wandb
 from scipy.signal import convolve2d
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
-import wandb
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -26,29 +28,30 @@ class Board:
         self.s = np.zeros([6, 7])
         # self.player?
 
-    def get_possible_moves(self):
+    def get_possible_moves(self) -> np.ndarray:
         moves = 6 - (self.s == 0).sum(0)
         return np.nonzero(moves < 6)[0]
 
-    def make_move_inplace(self, i, player):
+    def make_move_inplace(self, i: int, player: int) -> None:
         lev = 6 - np.count_nonzero(self.s[:, i] == 0)
         self.s[lev, i] = player
 
     @staticmethod  # note: doing this on GPU makes it slower
-    def check_winning_move(s, player):
+    def check_winning_move(s: np.ndarray, player: int) -> bool:
         for kernel in Board.detection_kernels:
             if (convolve2d(s == player, kernel, mode="valid") == 4).any():
                 return True
         return False
 
-    def winning_move(self, player):
+    def winning_move(self, player: int) -> bool:
         return self.check_winning_move(self.s, player)
 
 
 ######Moves:
 
 
-def get_nn_preds(board, model, player):
+@torch.no_grad
+def get_nn_preds(board: Board, model: nn.Module, player: int) -> pd.Series:
     possible_moves = board.get_possible_moves()
     moves_np = []
     for i in possible_moves:
@@ -60,27 +63,28 @@ def get_nn_preds(board, model, player):
     moves_np = np.array(moves_np).reshape(-1, 1, 6, 7)
 
     model.eval()
-    with torch.no_grad():
-        moves_np = torch.tensor(moves_np).float().to(device)
-        preds = model(moves_np).cpu().numpy()[:, 0]
+    moves_np = torch.tensor(moves_np).float().to(device)
+    preds = model(moves_np).cpu().numpy()[:, 0]
 
     return pd.Series(preds, possible_moves)
 
 
-def optimal_nn_move(board, model, player):
+def optimal_nn_move(board: Board, model: nn.Module, player: int) -> None:
     preds = get_nn_preds(board, model, player)
     best_move = preds.idxmax()
-    board.make_move_inplace(best_move, player)
+    board.make_move_inplace(cast(int, best_move), player)
 
 
-def optimal_nn_move_noise(board, player, model, std_noise=0):
+def optimal_nn_move_noise(
+    board: Board, player: int, model: nn.Module, std_noise: int = 0
+) -> None:
     preds = get_nn_preds(board, model, player)
     preds = preds + np.random.normal(0, std_noise, len(preds))
     best_move = preds.idxmax()
     board.make_move_inplace(best_move, player)
 
 
-def random_move(board, player, use_2ply_check):
+def random_move(board: Board, player: int, use_2ply_check: bool) -> None:
     possible_moves = board.get_possible_moves()
 
     if use_2ply_check:
@@ -124,8 +128,19 @@ def random_move(board, player, use_2ply_check):
     board.make_move_inplace(rand_move, player)
 
 
+class Player(Protocol):
+    # makes move inplace on board:
+    def make_move(self, board: Board, player: int) -> None: ...
+
+
 class Game:
-    def __init__(self, player_1, player_2, board=None, plot_rez=False):
+    def __init__(
+        self,
+        player_1: Player,
+        player_2: Player,
+        board: Board | None = None,
+        plot_rez: bool = False,
+    ):
         self.player_1 = player_1
         self.player_2 = player_2
         self.plot_rez = plot_rez
@@ -175,15 +190,24 @@ class Game:
         self.winners = turns
 
 
-class Player:
-    pass
-
-
 use_wandb = False
 
+
+class RandomPlayer:
+    def __init__(self, move_function, plus):
+        self.move_function = move_function
+        self.plus = plus
+        self.name = "random_player_2ply" if self.plus else "random_player"
+
+    def make_move(self, board, player):
+        return self.move_function(board, player, self.plus)
+
+
 class NNPlayer:
+    random_player_plus = RandomPlayer(random_move, True)
 
     def __init__(self, move_function, model, noise):
+        RandomPlayer(random_move, True)
         self.move_function = move_function
         self.noise = noise
         self.model = model
@@ -198,7 +222,7 @@ class NNPlayer:
     def simulate_random_games(self, n=500):
         for _ in tqdm(range(n)):
             states, winners, winner = Game(
-                random_player_plus, random_player_plus
+                self.random_player_plus, self.random_player_plus
             ).simulate()
             self.states.append(states)
             self.winners.append(winners)
@@ -230,7 +254,8 @@ class NNPlayer:
         print(f"{np.round(winning_perc, 2)}% winning against {opp.name}")
         if use_wandb:
             wandb.log(
-                {"winning_perc": winning_perc, "opp": opp.name}, step=self.model.global_step
+                {"winning_perc": winning_perc, "opp": opp.name},
+                step=self.model.global_step,
             )
 
     def train_model(self, ntrain=10000, last_n_games=15000, save_every_n_games=2000):
@@ -285,18 +310,8 @@ class NNPlayer:
         if self.games % save_every_n_games == 0:
             checkpoint_path = f"model_checkpoint_{self.model.global_step}.pth"
             torch.save(self.model, checkpoint_path)
-            if use_wandb: 
+            if use_wandb:
                 wandb.save(checkpoint_path)
-
-
-class RandomPlayer:
-    def __init__(self, move_function, plus):
-        self.move_function = move_function
-        self.plus = plus
-        self.name = "random_player_2ply" if self.plus else "random_player"
-
-    def make_move(self, board, player):
-        return self.move_function(board, player, self.plus)
 
 
 def play_vs(player_1, player_2, n_games=100):
