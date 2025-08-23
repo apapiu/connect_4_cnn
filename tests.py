@@ -1,8 +1,17 @@
 import numpy as np
 
-from nnplayer import (Board, Game, Model, NNPlayer, RandomPlayer,
-                      count_parameters, device, optimal_nn_move_noise,
-                      random_move)
+from nnplayer import (
+    Board,
+    Game,
+    Model,
+    NNPlayer,
+    RandomPlayer,
+    count_parameters,
+    device,
+    optimal_nn_move_noise,
+    random_move,
+)
+
 
 
 ###basic gameplay:

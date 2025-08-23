@@ -1,0 +1,227 @@
+from typing import Protocol, cast
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import wandb
+from tqdm import tqdm
+from models import device
+from board import Board
+from torch.utils.data import DataLoader, TensorDataset
+
+use_wandb = False
+
+
+class Player(Protocol):
+    # makes move inplace on board and returns the column played:
+    def make_move(self, board: Board, player: int) -> int: ...
+
+
+class RandomPlayer:
+    def __init__(self, move_function, plus):
+        self.move_function = move_function
+        self.plus = plus
+        self.name = "random_player_2ply" if self.plus else "random_player"
+
+    def make_move(self, board, player):
+        return self.move_function(board, player, self.plus)
+
+
+@torch.no_grad
+def get_nn_preds(board: Board, model: nn.Module, player: int) -> pd.Series:
+    possible_moves = board.get_possible_moves()
+    moves_np = []
+    for i in possible_moves:
+        s_new = board.s.copy()
+        board.make_move_inplace(i, player)
+        moves_np.append(board.s)
+        board.s = s_new.copy()  # Revert move
+
+    moves_np = np.array(moves_np).reshape(-1, 1, 6, 7)
+
+    model.eval()
+    moves_np = torch.tensor(moves_np).float().to(device)
+    preds = model(moves_np).cpu().numpy()[:, 0]
+
+    return pd.Series(preds, possible_moves)
+
+
+def optimal_nn_move(board: Board, model: nn.Module, player: int) -> int:
+    preds = get_nn_preds(board, model, player)
+    best_move = preds.idxmax()
+    board.make_move_inplace(cast(int, best_move), player)
+    return int(best_move)
+
+
+def optimal_nn_move_noise(
+    board: Board, player: int, model: nn.Module, std_noise: int = 0
+) -> int:
+    preds = get_nn_preds(board, model, player)
+    preds = preds + np.random.normal(0, std_noise, len(preds))
+    best_move = preds.idxmax()
+    board.make_move_inplace(best_move, player)
+    return best_move
+
+
+def random_move(board: Board, player: int, use_2ply_check: bool) -> int:
+    possible_moves = board.get_possible_moves()
+
+    if use_2ply_check:
+        for i in possible_moves:
+            s_new = board.s.copy()
+            board.make_move_inplace(i, player)
+            if board.winning_move(player):
+                return  # state is changed inplace
+            board.s = s_new.copy()
+
+        for i in possible_moves:
+            s_new = board.s.copy()
+            board.make_move_inplace(i, (-1) * player)
+            if board.winning_move((-1) * player):
+                board.s = s_new.copy()
+                board.make_move_inplace(i, player)
+                return
+            board.s = s_new.copy()
+
+        bad_moves = []
+        for i in possible_moves:
+            s_new = board.s.copy()
+            board.make_move_inplace(i, player)
+            pos_mov2 = board.get_possible_moves()
+
+            for j in pos_mov2:
+                s_new2 = board.s.copy()
+                board.make_move_inplace(j, player * (-1))
+
+                if board.winning_move((-1) * player):
+                    bad_moves.append(i)
+                board.s = s_new2.copy()
+
+            board.s = s_new.copy()
+
+        non_lose = np.setdiff1d(possible_moves, bad_moves)
+        if len(non_lose) > 0:
+            possible_moves = non_lose
+
+    rand_move = np.random.choice(possible_moves)
+    board.make_move_inplace(rand_move, player)
+    return rand_move
+
+
+class NNPlayer:
+    random_player_plus = RandomPlayer(random_move, True)
+
+    def __init__(self, move_function, model, noise):
+        RandomPlayer(random_move, True)
+        self.move_function = move_function
+        self.noise = noise
+        self.model = model
+        self.games = 0
+        self.states = []
+        self.winners = []
+        self.winner_eval = []
+        self.move_history = []
+
+    def make_move(self, board, player):
+        return self.move_function(board, player, self.model, self.noise)
+
+    def simulate_random_games(self, n=500):
+        from game import Game
+        for _ in tqdm(range(n)):
+            game = Game(self.random_player_plus, self.random_player_plus)
+            states, winners, winner, move_history = game.simulate()
+            self.states.append(states)
+            self.winners.append(winners)
+            # Store padded move history for transformer training
+            self.move_history.append(game.get_padded_move_history())
+
+    def simulate_noisy_game(self, n=100, noise_level=0.2):
+        from game import Game
+        for _ in tqdm(range(n)):
+            game = Game(
+                NNPlayer(optimal_nn_move_noise, self.model, noise_level),
+                NNPlayer(optimal_nn_move_noise, self.model, noise_level),
+            )
+            states, winners, winner, move_history = game.simulate()
+            self.states.append(states)
+            self.winners.append(winners)
+            # Store padded move history for transformer training
+            self.move_history.append(game.get_padded_move_history())
+
+        self.games += n
+
+        print(f"Model has been seen {self.games} self-play games")
+
+    def eval_model_battle(self, opp, n=30, first=True):
+        from game import Game
+        results = []
+        for _ in tqdm(range(n)):
+            game = Game(self, opp) if first else Game(opp, self)
+            states, winners, winner, _ = game.simulate()
+            results.append(winner)
+
+        self.winner_eval += results
+        model_win = 1 if first else -1
+        winning_perc = (pd.Series(results) == model_win).mean() * 100
+
+        print(f"{np.round(winning_perc, 2)}% winning against {opp.name}")
+        if use_wandb:
+            wandb.log(
+                {"winning_perc": winning_perc, "opp": opp.name},
+                step=self.model.global_step,
+            )
+
+    def train_model(self, ntrain=10000, last_n_games=15000, save_every_n_games=2000):
+        self.states = self.states[-last_n_games:]
+        self.winners = self.winners[-last_n_games:]
+
+        X = np.concatenate(self.states)
+        y = np.concatenate(self.winners)
+
+        moves_away = np.concatenate([np.arange(i.shape[0], 0, -1) for i in self.states])
+        sample_weights = 1 / moves_away
+
+        X_curr = X.reshape(-1, 1, 6, 7).astype("int8")
+        y_curr = y
+
+        print(X.shape)
+        print(y.shape)
+
+        if self.games % save_every_n_games == 0 and use_wandb:
+            print("Saving Data:")
+            np.save("X.npy", X_curr)
+            np.save("y.npy", y_curr)
+            np.save("sample_weights.npy", sample_weights)
+            wandb.save("X.npy")
+            wandb.save("y.npy")
+            wandb.save("sample_weights.npy")
+
+        choices = np.random.choice(np.arange(X_curr.shape[0]), ntrain)
+        tr_x = X_curr[choices]
+        tr_y = y_curr[choices]
+        sample_weights = sample_weights[choices]
+
+        dataset = TensorDataset(
+            torch.tensor(tr_x).float(),
+            torch.tensor(tr_y).float(),
+            torch.tensor(sample_weights).float(),
+        )
+
+        data_loader = DataLoader(dataset, batch_size=256, shuffle=True)
+
+        # tr_x = np.flip(tr_x, 2)
+        print("Training model")
+        for batch_idx, (x, y, sample_weights) in enumerate(data_loader):
+            x = x.to(device)
+            y = y.to(device)
+            sample_weights = sample_weights.to(device)
+            self.model.train()
+            loss = self.model.train_step(x, y, sample_weights)
+            if use_wandb:
+                wandb.log({"train_loss": loss}, step=self.model.global_step)
+
+        if self.games % save_every_n_games == 0:
+            checkpoint_path = f"model_checkpoint_{self.model.global_step}.pth"
+            torch.save(self.model, checkpoint_path)
+            if use_wandb:
+                wandb.save(checkpoint_path)
