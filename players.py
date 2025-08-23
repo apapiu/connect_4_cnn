@@ -225,3 +225,17 @@ class NNPlayer:
             torch.save(self.model, checkpoint_path)
             if use_wandb:
                 wandb.save(checkpoint_path)
+
+    def save_move_history(self, filename: str = None) -> str:
+        """Save move history data for transformer training."""
+        import json
+        from datetime import datetime
+        
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"move_history_{timestamp}.json"
+        
+        with open(filename, "w") as f:
+            json.dump(self.move_history, f)
+        
+        return filename
