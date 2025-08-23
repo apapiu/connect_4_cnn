@@ -10,7 +10,18 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Optimized device selection for Apple Silicon (M1/M2/M3)
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print("Using Apple Silicon GPU (MPS)")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+    print("Using NVIDIA GPU (CUDA)")
+else:
+    device = torch.device("cpu")
+    print("Using CPU")
+
+print(f"Training on: {device}")
 
 
 class Board:
@@ -69,22 +80,24 @@ def get_nn_preds(board: Board, model: nn.Module, player: int) -> pd.Series:
     return pd.Series(preds, possible_moves)
 
 
-def optimal_nn_move(board: Board, model: nn.Module, player: int) -> None:
+def optimal_nn_move(board: Board, model: nn.Module, player: int) -> int:
     preds = get_nn_preds(board, model, player)
     best_move = preds.idxmax()
     board.make_move_inplace(cast(int, best_move), player)
+    return int(best_move)
 
 
 def optimal_nn_move_noise(
     board: Board, player: int, model: nn.Module, std_noise: int = 0
-) -> None:
+) -> int:
     preds = get_nn_preds(board, model, player)
     preds = preds + np.random.normal(0, std_noise, len(preds))
     best_move = preds.idxmax()
     board.make_move_inplace(best_move, player)
+    return best_move
 
 
-def random_move(board: Board, player: int, use_2ply_check: bool) -> None:
+def random_move(board: Board, player: int, use_2ply_check: bool) -> int:
     possible_moves = board.get_possible_moves()
 
     if use_2ply_check:
@@ -126,11 +139,12 @@ def random_move(board: Board, player: int, use_2ply_check: bool) -> None:
 
     rand_move = np.random.choice(possible_moves)
     board.make_move_inplace(rand_move, player)
+    return rand_move
 
 
 class Player(Protocol):
-    # makes move inplace on board:
-    def make_move(self, board: Board, player: int) -> None: ...
+    # makes move inplace on board and returns the column played:
+    def make_move(self, board: Board, player: int) -> int: ...
 
 
 class Game:
@@ -148,6 +162,7 @@ class Game:
             board if board is not None else Board()
         )  # start with empty board is no board given
         self.game_states = []
+        self.move_history = []  # Track column moves (e.g., [3, 1, 4, 5])
         self.player = 1
         self.winner = None
         self.move_num = 0
@@ -157,9 +172,13 @@ class Game:
     def simulate(self):
         while self.winner is None:
             if self.player == 1:
-                self.player_1.make_move(self.board, self.player)
+                move = self.player_1.make_move(self.board, self.player)
             else:
-                self.player_2.make_move(self.board, self.player)
+                move = self.player_2.make_move(self.board, self.player)
+            
+            # Track the move (column number)
+            if move is not None:
+                self.move_history.append(int(move))
 
             self.game_states.append(self.board.s.copy())
 
@@ -176,7 +195,7 @@ class Game:
         self.append_game_results()
 
         # X and y for training
-        return self.states, self.winners, self.winner
+        return self.states, self.winners, self.winner, self.move_history
 
     def append_game_results(self):
         game_states_np = np.array(self.game_states).astype("int8")
@@ -188,6 +207,21 @@ class Game:
         turns = turns * self.winner if self.winner is not None else turns
         self.states = game_states_np
         self.winners = turns
+    
+    def get_padded_move_history(self) -> list[int]:
+        """
+        Returns move history padded to 42 moves (6*7 board size).
+        Pads with:
+        - 10 if player 1 wins
+        - 11 if player 2 wins  
+        - 12 if draw
+        """
+        # Determine padding token based on winner
+        pad_token = 10 if self.winner == 1 else (11 if self.winner == -1 else 12)
+        
+        # Fast padding using list multiplication
+        padding_needed = 42 - len(self.move_history)
+        return self.move_history + [pad_token] * padding_needed
 
 
 use_wandb = False
@@ -215,26 +249,33 @@ class NNPlayer:
         self.states = []
         self.winners = []
         self.winner_eval = []
+        self.move_history = []
 
     def make_move(self, board, player):
         return self.move_function(board, player, self.model, self.noise)
 
     def simulate_random_games(self, n=500):
         for _ in tqdm(range(n)):
-            states, winners, winner = Game(
+            game = Game(
                 self.random_player_plus, self.random_player_plus
-            ).simulate()
+            )
+            states, winners, winner, move_history = game.simulate()
             self.states.append(states)
             self.winners.append(winners)
+            # Store padded move history for transformer training
+            self.move_history.append(game.get_padded_move_history())
 
     def simulate_noisy_game(self, n=100, noise_level=0.2):
         for _ in tqdm(range(n)):
-            states, winners, winner = Game(
+            game = Game(
                 NNPlayer(optimal_nn_move_noise, self.model, noise_level),
                 NNPlayer(optimal_nn_move_noise, self.model, noise_level),
-            ).simulate()
+            )
+            states, winners, winner, move_history = game.simulate()
             self.states.append(states)
             self.winners.append(winners)
+            # Store padded move history for transformer training
+            self.move_history.append(game.get_padded_move_history())
 
         self.games += n
 
@@ -244,7 +285,7 @@ class NNPlayer:
         results = []
         for _ in tqdm(range(n)):
             game = Game(self, opp) if first else Game(opp, self)
-            states, winners, winner = game.simulate()
+            states, winners, winner, _ = game.simulate()
             results.append(winner)
 
         self.winner_eval += results
@@ -396,7 +437,13 @@ class Model(nn.Module):
         self.scheduler = torch.optim.lr_scheduler.StepLR(
             self.optimizer, step_size=10000, gamma=0.1
         )
-        self.scaler = GradScaler()
+        
+        # Use mixed precision only for CUDA (not supported on MPS yet)
+        self.use_amp = device.type == "cuda"
+        if self.use_amp:
+            self.scaler = GradScaler()
+        else:
+            self.scaler = None
 
     def forward(self, x):
         x = self.conv(x)
@@ -406,17 +453,28 @@ class Model(nn.Module):
         return (weight * (input - target) ** 2).mean()
 
     def train_step(self, x, y, weight):
-        with autocast():
+        if self.use_amp:
+            # Use mixed precision for CUDA
+            with autocast():
+                preds = self(x)
+                y = y.view(-1, 1)
+                weight = weight.view(-1, 1)
+                loss = self.weighted_mse_loss(preds, y, weight)
+
+            self.optimizer.zero_grad()
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            # Standard training for MPS/CPU (Apple Silicon optimized)
             preds = self(x)
             y = y.view(-1, 1)
             weight = weight.view(-1, 1)
             loss = self.weighted_mse_loss(preds, y, weight)
 
-        self.optimizer.zero_grad()
-        self.scaler.scale(loss).backward()
-
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
         self.scheduler.step()
         self.global_step += 1
@@ -433,7 +491,7 @@ if __name__ == "__main__":
     random_player_reg = RandomPlayer(random_move, False)
 
     # TODO: put this in a yaml file:
-    n_iter = 100
+    n_iter = 2
     warm_start = False
     n_games = 1000
     ntrain = n_games * 50
@@ -487,3 +545,12 @@ if __name__ == "__main__":
             save_every_n_games=save_every_n_games,
         )
     wandb.finish()
+    
+    # Save move history data for transformer training
+    import json
+    from datetime import datetime
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_filename = f"move_history_{timestamp}.json"
+    with open(json_filename, 'w') as f:
+        json.dump(nnplayer_regular.move_history, f)

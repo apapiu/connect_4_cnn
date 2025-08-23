@@ -38,7 +38,34 @@ by forcing a win.
 
 ### Setup:
 
-run ```python nn_player.py```
+#### Using uv (Recommended)
+
+1. Install uv if you haven't already:
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+2. Create and activate a virtual environment with dependencies:
+   ```bash
+   uv venv
+   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   uv sync
+   ```
+
+3. Run the training:
+   ```bash
+   uv run python nnplayer.py
+   ```
+
+#### Alternative Setup (pip)
+
+If you prefer using pip:
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+python nnplayer.py
+```
 
 ### Play against the model
 
