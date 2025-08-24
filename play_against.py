@@ -1,5 +1,9 @@
 import numpy as np
 from nn_player import get_nn_preds
+import pandas as pd
+import matplotlib.pyplot as plt
+from IPython.display import display, clear_output
+import time
 
 
 def play_against_human(player_class, human_player):

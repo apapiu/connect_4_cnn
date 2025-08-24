@@ -7,6 +7,7 @@ import wandb
 from tqdm import tqdm
 from models import device
 from board import Board
+from transformer import Transformer, get_probabilities
 from torch.utils.data import DataLoader, TensorDataset
 
 use_wandb = False
@@ -14,7 +15,7 @@ use_wandb = False
 
 class Player(Protocol):
     # makes move inplace on board and returns the column played:
-    def make_move(self, board: Board, player: int) -> int: ...
+    def make_move(self, board: Board, player: int, move_history: list[int] | None = None) -> int: ...
 
 
 class RandomPlayer:
@@ -23,7 +24,7 @@ class RandomPlayer:
         self.plus = plus
         self.name = "random_player_2ply" if self.plus else "random_player"
 
-    def make_move(self, board, player):
+    def make_move(self, board, player, move_history = None):
         return self.move_function(board, player, self.plus)
 
 
@@ -44,6 +45,25 @@ def get_nn_preds(board: Board, model: nn.Module, player: int) -> pd.Series:
     preds = model(moves_np).cpu().numpy()[:, 0]
 
     return pd.Series(preds, possible_moves)
+
+def optimal_transformer_move(board: Board, model: nn.Module, move_history: list[int], player:int):
+    possible_moves = board.get_possible_moves()
+    
+    # Get probabilities for all moves
+    preds = get_probabilities(model, move_history, device)
+    
+    # Mask out impossible moves by setting them to -inf
+    masked_preds = preds.clone()
+    for i in range(len(masked_preds)):
+        if i not in possible_moves:
+            masked_preds[i] = float('-inf')
+    
+    # Get the move with highest probability among possible moves
+    best_move = masked_preds.argmax().item()
+    
+    board.make_move_inplace(cast(int, best_move), player)
+    return int(best_move)
+
 
 
 def optimal_nn_move(board: Board, model: nn.Module, player: int) -> int:
@@ -107,22 +127,30 @@ def random_move(board: Board, player: int, use_2ply_check: bool) -> int:
     board.make_move_inplace(rand_move, player)
     return rand_move
 
+class TransformerPlayer:
+    def __init__(self, model, move_function=optimal_transformer_move):
+        self.model = model
+        self.move_function = optimal_transformer_move
+    
+    def make_move(self, board, player, move_history):
+        self.move_function(board, self.model, move_history, player)
 
 class NNPlayer:
     random_player_plus = RandomPlayer(random_move, True)
 
-    def __init__(self, move_function, model, noise):
+    def __init__(self, move_function, model, noise, transformer = None):
         RandomPlayer(random_move, True)
         self.move_function = move_function
         self.noise = noise
         self.model = model
+        self.transformer : Transformer | None = transformer
         self.games = 0
         self.states = []
         self.winners = []
         self.winner_eval = []
         self.move_history = []
 
-    def make_move(self, board, player):
+    def make_move(self, board, player, move_history=None):
         return self.move_function(board, player, self.model, self.noise)
 
     def simulate_random_games(self, n=500):
@@ -170,6 +198,54 @@ class NNPlayer:
                 {"winning_perc": winning_perc, "opp": opp.name},
                 step=self.model.global_step,
             )
+
+    def train_transformer_model(self, ntrain=1000, last_n_games=15000):
+
+        if not self.transformer:
+            raise ValueError("Transformer needs to be defined for training!")
+
+        seq_len = 41
+
+        move_hist = self.move_history[-last_n_games:]
+
+        # we will use these as reward in the loss function:
+        winners  = self.winners[-last_n_games:]
+
+        rewards = [winner[1:] for winner in winners]
+        padded_rewards = []
+        for reward in rewards:
+            padding_needed = seq_len - len(reward)
+            padded_reward = np.pad(reward, (0, padding_needed), constant_values=1)
+            padded_rewards.append(padded_reward)
+
+        rewards = padded_rewards
+
+        move_hist = np.array(move_hist)
+        data = move_hist
+
+        X = data[:, :-1]  # All columns except last
+        y = data[:, 1:]   # All columns except first
+
+        choices = np.random.choice(np.arange(X.shape[0]), ntrain)
+
+        # Convert to tensors
+        X_tensor = torch.LongTensor(X[choices])
+        y_tensor = torch.LongTensor(y[choices])
+        rewards_tensor = torch.LongTensor(np.vstack(rewards)[choices])
+        pos_enc = torch.arange(seq_len).unsqueeze(0).repeat(X.shape[0], 1)[choices]
+    
+        # Create dataset with position encodings
+        dataset = TensorDataset(X_tensor, pos_enc, rewards_tensor, y_tensor)
+        
+        # Create dataloader with shuffling
+        data_loader = DataLoader(dataset, batch_size=256, shuffle=True, drop_last=True)
+
+        for batch_idx, batch in enumerate(data_loader):
+   
+            self.transformer.train()
+            loss = self.transformer.train_step_full_precision(batch, device)
+            print(f'Transformer loss is {loss}')
+
 
     def train_model(self, ntrain=10000, last_n_games=15000, save_every_n_games=2000):
         self.states = self.states[-last_n_games:]
@@ -235,7 +311,22 @@ class NNPlayer:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"move_history_{timestamp}.json"
         
+        # Pad winners to length 41 (similar to train_transformer_model)
+        seq_len = 41
+        padded_winners = []
+        for winner in self.winners:
+            # Skip first element (like in train_transformer_model: winner[1:])
+            reward = winner[1:] if len(winner) > 1 else winner
+            padding_needed = seq_len - len(reward)
+            padded_reward = np.pad(reward, (0, padding_needed), constant_values=1)
+            padded_winners.append(padded_reward.tolist())
+        
+        data = {
+            "move_history": self.move_history,
+            "winners": padded_winners
+        }
+        
         with open(filename, "w") as f:
-            json.dump(self.move_history, f)
+            json.dump(data, f)
         
         return filename

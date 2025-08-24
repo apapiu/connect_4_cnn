@@ -1,6 +1,8 @@
 from board import Board
 from players import Player
 import numpy as np
+import pandas as pd
+from tqdm import tqdm
 
 
 class Game:
@@ -28,9 +30,9 @@ class Game:
     def simulate(self):
         while self.winner is None:
             if self.player == 1:
-                move = self.player_1.make_move(self.board, self.player)
+                move = self.player_1.make_move(self.board, self.player, self.move_history)
             else:
-                move = self.player_2.make_move(self.board, self.player)
+                move = self.player_2.make_move(self.board, self.player, self.move_history)
 
             # Track the move (column number)
             if move is not None:
@@ -75,6 +77,18 @@ class Game:
         # Determine padding token based on winner
         pad_token = 10 if self.winner == 1 else (11 if self.winner == -1 else 12)
 
-        # Fast padding using list multiplication
         padding_needed = 42 - len(self.move_history)
         return self.move_history + [pad_token] * padding_needed
+
+
+def play_vs(player_1, player_2, n_games=100):
+    winner_eval = []
+
+    for i in tqdm(range(n_games)):
+        _, _, winner, _ = Game(player_1, player_2).simulate()
+
+        winner_eval.append(winner)
+
+    print(pd.Series(winner_eval).value_counts(normalize=True))
+
+    return pd.Series(winner_eval).value_counts(normalize=True)

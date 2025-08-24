@@ -8,7 +8,7 @@ class Config:
     """Configuration for Connect 4 training."""
     
     # Training parameters
-    n_iter: int = 10
+    n_iter: int = 40
     warm_start: bool = False
     n_games: int = 1000
     eval_games: int = 50
@@ -33,5 +33,23 @@ class Config:
         return self.n_games * 50
 
 
-# Default configuration instance
+@dataclass
+class TransformerConfig:
+    """Configuration for Transformer model."""
+    
+    # Transformer hyperparameters
+    vocab_size: int = 12  # Connect4 columns: 0-6, plus padding tokens 10,11
+    embed_dim: int = 128  # Smaller for Connect4
+    seq_length: int = 41  # JSON sequences are 42 long, so input is 41
+    n_heads: int = 4  # Multi-head attention
+    attention_layers: int = 6  # Transformer layers
+    dropout: float = 0.3  # Regularization
+    mlp_multiplier: int = 2  # MLP expansion factor
+    lr: float = 3e-4  # Learning rate for transformer
+    epsilon: float = 1e-7  # Adam epsilon
+    batch_size: int = 256  # Batch size
+
+
+# Default configuration instances
 config = Config()
+transformer_config = TransformerConfig()
