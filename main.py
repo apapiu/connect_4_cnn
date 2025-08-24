@@ -49,7 +49,7 @@ if __name__ == "__main__":
             "learning_rate": config.learning_rate,
             "experiment_name": config.experiment_name,
         }
-        wandb.init(project="connect_4", config=wandb_config)
+        wandb.init(project="connect_4_transformer", config=wandb_config)
 
     # Training loop
     noise_current = config.noise_initial
@@ -57,7 +57,7 @@ if __name__ == "__main__":
         noise_current = max(noise_current * config.noise_decay, config.noise_min)
         nnplayer_regular.eval_model_battle(n=config.eval_games, opp=opp, first=False)
         print("EVALS Transformer player:")
-        play_vs(random_player_plus, transformer_player, n_games=100)
+        result = play_vs(random_player_plus, transformer_player, n_games=100)
         noise = np.random.uniform(noise_current, noise_current)
         print(f"Iteration {i+1}/{config.n_iter}, Noise: {noise:.3f}")
         nnplayer_regular.simulate_noisy_game(n=config.n_games, noise_level=noise)

@@ -1,0 +1,5 @@
+*.json
+wandb/*
+*.pth
+uv.lock
+*.pyc

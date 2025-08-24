@@ -208,14 +208,28 @@ class NNPlayer:
 
         move_hist = self.move_history[-last_n_games:]
 
+        moves_away = [np.arange(i.shape[0], 0, -1) for i in self.states[-last_n_games:]]
+
         # we will use these as reward in the loss function:
+        # weight reward close to the end point of the game more:
         winners  = self.winners[-last_n_games:]
 
-        rewards = [winner[1:] for winner in winners]
+        winners_new = []
+        for i in range(len(winners)):
+            sample_weights = 1 / moves_away[i]
+
+            # this makes the reward always positive -- we are ust doing weighted log likelihood:
+            curr_winners = winners[i].copy()#np.abs(winners[i].copy())
+
+            winners_new.append(curr_winners*sample_weights)    
+
+        rewards = [winner[1:] for winner in winners_new]
+
+
         padded_rewards = []
         for reward in rewards:
             padding_needed = seq_len - len(reward)
-            padded_reward = np.pad(reward, (0, padding_needed), constant_values=1)
+            padded_reward = np.pad(reward, (0, padding_needed), constant_values=0)
             padded_rewards.append(padded_reward)
 
         rewards = padded_rewards
@@ -231,7 +245,8 @@ class NNPlayer:
         # Convert to tensors
         X_tensor = torch.LongTensor(X[choices])
         y_tensor = torch.LongTensor(y[choices])
-        rewards_tensor = torch.LongTensor(np.vstack(rewards)[choices])
+
+        rewards_tensor = torch.Tensor(np.vstack(rewards)[choices])
         pos_enc = torch.arange(seq_len).unsqueeze(0).repeat(X.shape[0], 1)[choices]
     
         # Create dataset with position encodings
